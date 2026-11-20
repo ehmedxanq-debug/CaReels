@@ -3,6 +3,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDocFromServer,
   increment,
   onSnapshot,
   orderBy,
@@ -12,17 +13,34 @@ import {
 } from 'firebase/firestore';
 import { Ban, CornerDownRight, Send, X } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { CommentItem, PostItem, UserProfile } from '../types';
+import { CommentItem, PostItem, PublicPersonProfile, UserProfile } from '../types';
+import {
+  isSystemOrProtectedUid,
+  isUidKnownDeleted,
+  verifyAndPurgeIfAccountDeleted,
+} from '../utils/accountCleanup';
+import { isAccountBlockedFromDoc } from '../utils/accountStorage';
+import { UserAvatar } from './UserAvatar';
 
 interface CommentsSheetProps {
   post: PostItem;
   userProfile: UserProfile;
+  peopleDirectory?: Record<string, PublicPersonProfile>;
+  peopleDirectoryReady?: boolean;
+  deletedUids?: Record<string, true>;
+  onMarkUidDeleted?: (uid: string) => void;
+  onRequireLogin?: () => void;
   onClose: () => void;
 }
 
 export const CommentsSheet: React.FC<CommentsSheetProps> = ({
   post,
   userProfile,
+  peopleDirectory,
+  peopleDirectoryReady = false,
+  deletedUids,
+  onMarkUidDeleted,
+  onRequireLogin,
   onClose,
 }) => {
   const [comments, setComments] = useState<CommentItem[]>([]);
@@ -53,6 +71,7 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
             postId: post.id,
             userId: String(data.userId || ''),
             username: String(data.username || 'istifadəçi'),
+            authorPhotoURL: data.authorPhotoURL ? String(data.authorPhotoURL) : undefined,
             text: String(data.text || ''),
             parentId: data.parentId ? String(data.parentId) : null,
             createdAtMs,
@@ -70,11 +89,71 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
     return () => unsub();
   }, [post.id]);
 
+  const [localDeletedUids, setLocalDeletedUids] = useState<Record<string, true>>({});
+
+  useEffect(() => {
+    if (!peopleDirectoryReady || !peopleDirectory || comments.length === 0) return;
+    const candidateUids = Array.from(
+      new Set(
+        comments
+          .map((c) => c.userId)
+          .filter(
+            (uid) =>
+              uid &&
+              !isSystemOrProtectedUid(uid) &&
+              !peopleDirectory[uid] &&
+              !deletedUids?.[uid] &&
+              !localDeletedUids[uid]
+          )
+      )
+    );
+    for (const uid of candidateUids) {
+      void verifyAndPurgeIfAccountDeleted(uid, [post.id]).then((wasDeleted) => {
+        if (wasDeleted) {
+          setLocalDeletedUids((prev) => (prev[uid] ? prev : { ...prev, [uid]: true }));
+          onMarkUidDeleted?.(uid);
+        }
+      });
+    }
+  }, [comments, peopleDirectoryReady, peopleDirectory, deletedUids, localDeletedUids, post.id, onMarkUidDeleted]);
+
+  const visibleComments = useMemo(() => {
+    return comments.filter(
+      (c) => !deletedUids?.[c.userId] && !localDeletedUids[c.userId] && !isUidKnownDeleted(c.userId)
+    );
+  }, [comments, deletedUids, localDeletedUids]);
+
+  const peopleByUsername = useMemo(() => {
+    const map: Record<string, PublicPersonProfile> = {};
+    if (!peopleDirectory) return map;
+    for (const person of Object.values(peopleDirectory)) {
+      const key = (person.username || '').replace(/^@+/, '').trim().toLowerCase();
+      if (key && !map[key]) {
+        map[key] = person;
+      }
+    }
+    return map;
+  }, [peopleDirectory]);
+
+  const resolveCommentPhoto = (item: CommentItem): string | undefined => {
+    if (item.userId && peopleDirectory?.[item.userId]?.photoURL) {
+      return peopleDirectory[item.userId].photoURL;
+    }
+    const cleanName = (item.username || '').replace(/^@+/, '').trim().toLowerCase();
+    if (cleanName && peopleByUsername[cleanName]?.photoURL) {
+      return peopleByUsername[cleanName].photoURL;
+    }
+    if (item.userId && item.userId === userProfile.uid && userProfile.photoURL) {
+      return userProfile.photoURL;
+    }
+    return item.authorPhotoURL || undefined;
+  };
+
   // Organize into top-level comments + replies map
   const { topLevel, repliesMap } = useMemo(() => {
     const top: CommentItem[] = [];
     const map: Record<string, CommentItem[]> = {};
-    for (const c of comments) {
+    for (const c of visibleComments) {
       if (c.parentId) {
         if (!map[c.parentId]) map[c.parentId] = [];
         map[c.parentId].push(c);
@@ -83,7 +162,7 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
       }
     }
     return { topLevel: top, repliesMap: map };
-  }, [comments]);
+  }, [visibleComments]);
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,11 +176,24 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
     setSending(true);
     setError(null);
     try {
+      if (!userProfile.isGuest && userProfile.uid) {
+        try {
+          const freshSnap = await getDocFromServer(doc(db, 'people', userProfile.uid));
+          if (freshSnap.exists() && isAccountBlockedFromDoc(freshSnap.data() as Record<string, unknown>)) {
+            setError('Hesabınız bloklanıb. Rəy yaza bilməzsiniz.');
+            setSending(false);
+            return;
+          }
+        } catch {
+          // Fallback to userProfile.isBlocked
+        }
+      }
       const commentsRef = collection(db, 'posts', post.id, 'comments');
       await addDoc(commentsRef, {
         postId: post.id,
         userId: userProfile.uid,
         username: userProfile.username,
+        authorPhotoURL: userProfile.isGuest ? '' : userProfile.photoURL || '',
         text: trimmed,
         parentId: replyingTo ? replyingTo.id : null,
         createdAt: serverTimestamp(),
@@ -137,11 +229,11 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
     return `${diffDay} gün`;
   };
 
-  const totalDisplayed = Math.max(comments.length, post.commentsCount);
+  const totalDisplayed = visibleComments.length;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:justify-end"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 sm:items-center sm:justify-end"
       onClick={onClose}
     >
       <div
@@ -186,9 +278,12 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
               return (
                 <div key={comment.id} className="space-y-3">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#A8001E]/20 text-xs font-bold text-[#A8001E]">
-                      {comment.username.slice(0, 2).toUpperCase()}
-                    </div>
+                    <UserAvatar
+                      photoURL={resolveCommentPhoto(comment)}
+                      name={comment.username}
+                      sizeClass="h-8 w-8"
+                      textClass="text-xs"
+                    />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 text-xs">
                         <span className="font-semibold text-zinc-200">@{comment.username}</span>
@@ -218,9 +313,12 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
                     <div className="ml-9 space-y-3 border-l border-white/10 pl-3.5">
                       {replies.map((reply) => (
                         <div key={reply.id} className="flex items-start gap-2.5">
-                          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-[10px] font-bold text-zinc-200">
-                            {reply.username.slice(0, 2).toUpperCase()}
-                          </div>
+                          <UserAvatar
+                            photoURL={resolveCommentPhoto(reply)}
+                            name={reply.username}
+                            sizeClass="h-6 w-6"
+                            textClass="text-[10px]"
+                          />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2 text-xs">
                               <span className="font-semibold text-zinc-200">@{reply.username}</span>
@@ -243,7 +341,23 @@ export const CommentsSheet: React.FC<CommentsSheetProps> = ({
 
         {/* Reply Indicator & Composer */}
         <div className="border-t border-white/10 bg-[#0D0D12] p-4">
-          {userProfile.isBlocked ? (
+          {userProfile.isGuest ? (
+            <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/15 bg-white/[0.04] px-4 py-2.5">
+              <span className="text-xs text-zinc-300">
+                Rəy yazmaq üçün Google hesabı ilə daxil olun.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onRequireLogin?.();
+                }}
+                className="shrink-0 rounded-xl bg-[#A8001E] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#C8102E] transition-colors cursor-pointer"
+              >
+                Daxil ol
+              </button>
+            </div>
+          ) : userProfile.isBlocked ? (
             <div className="flex items-center justify-center gap-2.5 rounded-2xl border border-[#A8001E]/50 bg-[#A8001E]/15 px-4 py-3 text-xs font-semibold text-rose-200">
               <Ban className="h-4 w-4 shrink-0 text-[#E04F67]" />
               <span>Hesabınız bloklanıb. Videolara rəy yaza bilməzsiniz.</span>

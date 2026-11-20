@@ -1,16 +1,50 @@
-import React, { useState } from 'react';
-import { Check, Copy, Download, MessageCircle, Share2, X } from 'lucide-react';
-import { PostItem } from '../types';
+import React, { useEffect, useState } from 'react';
+import { deleteDoc, doc } from 'firebase/firestore';
+import { Check, Copy, Download, Loader2, MessageCircle, PlaySquare, Share2, Trash2, X } from 'lucide-react';
+import { db, handleFirestoreError, OperationType } from '../firebase';
+import { PostItem, UserProfile } from '../types';
+import {
+  hasNativeAdMobBridge,
+  preloadRewardedDownloadAd,
+  showRewardedDownloadAd,
+} from '../utils/admob';
 
 interface ShareDownloadSheetProps {
   post: PostItem;
+  viewerProfile: UserProfile;
+  onAdPlayingChange?: (playing: boolean) => void;
+  onDeleted?: (postId: string) => void;
   onClose: () => void;
 }
 
-export const ShareDownloadSheet: React.FC<ShareDownloadSheetProps> = ({ post, onClose }) => {
+export const ShareDownloadSheet: React.FC<ShareDownloadSheetProps> = ({
+  post,
+  viewerProfile,
+  onAdPlayingChange,
+  onDeleted,
+  onClose,
+}) => {
   const [copied, setCopied] = useState(false);
+  const [waitingAd, setWaitingAd] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  const nativeAdAvailable = hasNativeAdMobBridge();
+
+  useEffect(() => {
+    void preloadRewardedDownloadAd();
+  }, []);
+
+  const isOwner =
+    !viewerProfile.isGuest &&
+    Boolean(
+      (post.uid && post.uid === viewerProfile.uid) ||
+        (!post.uid &&
+          post.username &&
+          viewerProfile.username &&
+          post.username.toLowerCase() === viewerProfile.username.toLowerCase())
+    );
 
   const shareUrl = `${window.location.origin}/?post=${encodeURIComponent(post.id)}`;
   const shareText = `CaReels videosuna bax: ${post.caption || 'CaReels'}${post.musicName ? ` · Musiqi: ${post.musicName}` : ''}`;
@@ -53,9 +87,23 @@ export const ShareDownloadSheet: React.FC<ShareDownloadSheetProps> = ({ post, on
   };
 
   const handleDownloadToGallery = async () => {
-    if (!post.videoUrl) return;
-    setDownloading(true);
+    if (!post.videoUrl || waitingAd || downloading) return;
     setDownloadStatus(null);
+    setWaitingAd(true);
+    onAdPlayingChange?.(true);
+
+    try {
+      const adResult = await showRewardedDownloadAd();
+      if (!adResult.rewarded) {
+        setDownloadStatus('Videonu endirmək üçün reklamı sona qədər izləməlisiniz.');
+        return;
+      }
+    } finally {
+      onAdPlayingChange?.(false);
+      setWaitingAd(false);
+    }
+
+    setDownloading(true);
     try {
       let response = await fetch(post.videoUrl, { mode: 'cors' }).catch(() => null);
       if (!response || !response.ok) {
@@ -84,16 +132,34 @@ export const ShareDownloadSheet: React.FC<ShareDownloadSheetProps> = ({ post, on
       setDownloadStatus('Endirmə başladıldı.');
     } finally {
       setDownloading(false);
+      void preloadRewardedDownloadAd();
+    }
+  };
+
+  const handleDeletePost = async () => {
+    if (!isOwner || deleting) return;
+    setDeleting(true);
+    setDownloadStatus(null);
+    try {
+      await deleteDoc(doc(db, 'posts', post.id));
+      onDeleted?.(post.id);
+      onClose();
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `posts/${post.id}`);
+      setDownloadStatus('Videonu silmək mümkün olmadı.');
+      setDeleting(false);
     }
   };
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/65 backdrop-blur-sm sm:items-center"
-      onClick={onClose}
+      onClick={() => {
+        if (!deleting) onClose();
+      }}
     >
       <div
-        className="w-full max-w-md rounded-t-3xl border border-white/15 bg-[#121218] p-5 text-white shadow-2xl sm:rounded-3xl"
+        className="w-full max-w-md rounded-t-3xl border border-white/15 bg-[#121218] p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-white shadow-2xl sm:rounded-3xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-white/20 sm:hidden" />
@@ -104,6 +170,7 @@ export const ShareDownloadSheet: React.FC<ShareDownloadSheetProps> = ({ post, on
           </h2>
           <button
             type="button"
+            disabled={deleting}
             onClick={onClose}
             aria-label="Bağla"
             className="flex h-10 w-10 items-center justify-center rounded-full text-zinc-400 hover:bg-white/10 hover:text-white transition-colors cursor-pointer"
@@ -147,12 +214,71 @@ export const ShareDownloadSheet: React.FC<ShareDownloadSheetProps> = ({ post, on
           <button
             type="button"
             onClick={handleDownloadToGallery}
-            disabled={downloading || !post.videoUrl}
+            disabled={waitingAd || downloading || !post.videoUrl}
             className="flex min-h-[52px] w-full items-center gap-3.5 rounded-2xl bg-[#A8001E] px-4 py-3 text-left text-sm font-semibold text-white shadow-[0_8px_24px_rgba(255,32,78,0.3)] hover:bg-[#C8102E] transition-colors disabled:opacity-50 cursor-pointer"
           >
-            <Download className="h-5 w-5 shrink-0" />
-            <span>{downloading ? 'Endirilir...' : 'Cihazın qalereyasına endir'}</span>
+            {waitingAd || downloading ? (
+              <Loader2 className="h-5 w-5 shrink-0 animate-spin" />
+            ) : nativeAdAvailable ? (
+              <PlaySquare className="h-5 w-5 shrink-0" />
+            ) : (
+              <Download className="h-5 w-5 shrink-0" />
+            )}
+            <span>
+              {waitingAd
+                ? 'Reklam göstərilir...'
+                : downloading
+                  ? 'Endirilir...'
+                  : nativeAdAvailable
+                    ? 'Reklama baxıb qalereyaya endir'
+                    : 'Cihazın qalereyasına endir'}
+            </span>
           </button>
+
+          {/* Delete Video — ONLY visible to the post's owner */}
+          {isOwner && (
+            !confirmDelete ? (
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                className="flex min-h-[52px] w-full items-center gap-3.5 rounded-2xl border border-rose-500/35 bg-rose-500/10 px-4 py-3 text-left text-sm font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors cursor-pointer"
+              >
+                <Trash2 className="h-5 w-5 shrink-0 text-rose-400" />
+                <span>Videonu sil</span>
+              </button>
+            ) : (
+              <div className="rounded-2xl border border-rose-500/40 bg-rose-500/15 p-3.5 space-y-2.5">
+                <p className="text-xs font-semibold text-rose-200">
+                  Bu videonu silmək istədiyinizə əminsiniz?
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    onClick={() => setConfirmDelete(false)}
+                    className="min-h-[40px] rounded-xl border border-white/15 bg-white/5 text-xs font-semibold text-white hover:bg-white/10 cursor-pointer"
+                  >
+                    Ləğv et
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    onClick={handleDeletePost}
+                    className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl bg-rose-600 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-60 cursor-pointer"
+                  >
+                    {deleting ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Silinir...</span>
+                      </>
+                    ) : (
+                      <span>Bəli, sil</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )
+          )}
         </div>
 
         {downloadStatus && (

@@ -1,42 +1,220 @@
-import React, { useState } from 'react';
-import { signInWithPopup } from 'firebase/auth';
-import { Disc3, Film, Music2, ShieldCheck, Volume2 } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  onAuthStateChanged,
+  signInAnonymously,
+  signInWithPopup,
+} from 'firebase/auth';
+import {
+  Disc3,
+  ExternalLink,
+  Film,
+  Music2,
+  ShieldCheck,
+  UserCheck,
+  Volume2,
+} from 'lucide-react';
 import { auth, googleProvider } from '../firebase';
 import { CaReelsLogo } from './CaReelsLogo';
 
 interface LoginScreenProps {
   onSuccess?: () => void;
+  onGuestContinue?: () => void;
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess }) => {
+function isInIframe(): boolean {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
+function isInAppWebView(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /Telegram|FBAN|FBAV|Instagram|Line\/|MicroMessenger|Twitter|TikTok/i.test(ua);
+}
+
+function formatFirebaseAuthError(err: unknown): {
+  text: string;
+  needsExternalBrowser?: boolean;
+} {
+  const code =
+    typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code?: unknown }).code || '')
+      : '';
+  const message = err instanceof Error ? err.message : String(err || '');
+  const combined = `${code} ${message}`.toLowerCase();
+
+  if (combined.includes('unauthorized-domain')) {
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    return {
+      text: `Bu domen (${host}) Firebase icazəli domenlər (Authorized domains) siyahısında deyil. Firebase Console → Authentication → Settings → Authorized domains bölməsinə əlavə edin.`,
+    };
+  }
+  if (combined.includes('popup-blocked')) {
+    return {
+      text: 'Brauzer giriş pəncərəsini (Pop-up) blokladı. Pop-up icazəsi verib yenidən toxunun.',
+      needsExternalBrowser: isInIframe() || isInAppWebView(),
+    };
+  }
+  if (combined.includes('popup-closed-by-user') || combined.includes('cancelled-popup-request')) {
+    return {
+      text: isInIframe() || isInAppWebView()
+        ? 'Bu pəncərədə Google girişi yarımçıq qaldı. Aşağıdakı düymə ilə Safari/Chrome-da tam ekranda açıb daxil olun.'
+        : 'Google hesab seçimi tamamlanmadı. Yenidən toxunub hesabınızı seçin.',
+      needsExternalBrowser: isInIframe() || isInAppWebView(),
+    };
+  }
+  if (combined.includes('operation-not-supported') || combined.includes('web-storage-unsupported')) {
+    return {
+      text: 'Gizli rejim (Private Browsing) və ya cookie məhdudiyyəti girişə mane olur. Normal brauzer rejimində açın.',
+      needsExternalBrowser: true,
+    };
+  }
+  if (combined.includes('network-request-failed')) {
+    return {
+      text: 'İnternet bağlantısı xətası. Bağlantınızı yoxlayıb yenidən cəhd edin.',
+    };
+  }
+  return {
+    text: `Daxil olmaq mümkün olmadı (${code || 'xəta'}). Yenidən cəhd edin.`,
+    needsExternalBrowser: isInIframe() || isInAppWebView(),
+  };
+}
+
+export const LoginScreen: React.FC<LoginScreenProps> = ({
+  onSuccess,
+  onGuestContinue,
+}) => {
   const [loading, setLoading] = useState(false);
+  const [guestLoading, setGuestLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [needsExternalBrowser, setNeedsExternalBrowser] = useState(false);
+
+  const popupInFlightRef = useRef(false);
+  const recoveryTimerRef = useRef<number | null>(null);
+  const safetyTimerRef = useRef<number | null>(null);
+
+  const clearAuthTimers = useCallback(() => {
+    popupInFlightRef.current = false;
+    if (recoveryTimerRef.current !== null) {
+      window.clearTimeout(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+    if (safetyTimerRef.current !== null) {
+      window.clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => clearAuthTimers();
+  }, [clearAuthTimers]);
+
+  // Unlock immediately if Firebase auth succeeds while Safari/Chrome popup promise stalled due to COOP
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        clearAuthTimers();
+        setLoading(false);
+        onSuccess?.();
+      }
+    });
+    return () => unsub();
+  }, [clearAuthTimers, onSuccess]);
+
+  // Recover cleanly if user returns from Google account picker on Safari/Chrome and the popup promise hung
+  useEffect(() => {
+    const handleReturnFromPopup = () => {
+      if (!popupInFlightRef.current) return;
+      if (document.visibilityState === 'hidden') return;
+
+      if (recoveryTimerRef.current !== null) {
+        window.clearTimeout(recoveryTimerRef.current);
+      }
+      recoveryTimerRef.current = window.setTimeout(() => {
+        if (!popupInFlightRef.current) return;
+        if (auth.currentUser) {
+          clearAuthTimers();
+          setLoading(false);
+          onSuccess?.();
+          return;
+        }
+        clearAuthTimers();
+        setLoading(false);
+        setError('Google hesab seçimi cavab vermədi. Yenidən toxunub cəhd edin.');
+      }, 2800);
+    };
+
+    const handlePageShow = () => {
+      if (!auth.currentUser) {
+        clearAuthTimers();
+        setLoading(false);
+      }
+    };
+
+    window.addEventListener('focus', handleReturnFromPopup);
+    window.addEventListener('pageshow', handlePageShow);
+    document.addEventListener('visibilitychange', handleReturnFromPopup);
+    return () => {
+      window.removeEventListener('focus', handleReturnFromPopup);
+      window.removeEventListener('pageshow', handlePageShow);
+      document.removeEventListener('visibilitychange', handleReturnFromPopup);
+    };
+  }, [clearAuthTimers, onSuccess]);
+
+  const handleGuestSignIn = async () => {
+    if (loading || guestLoading) return;
+    setGuestLoading(true);
+    setError(null);
+    clearAuthTimers();
+
+    try {
+      await Promise.race([
+        signInAnonymously(auth),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 2500)),
+      ]);
+    } catch {
+      // Anonymous auth disabled or unavailable -> continue cleanly in local guest mode
+    } finally {
+      setGuestLoading(false);
+      onGuestContinue?.();
+    }
+  };
 
   const handleGoogleSignIn = async () => {
+    if (loading) return;
     setLoading(true);
     setError(null);
+    setNeedsExternalBrowser(false);
+
+    popupInFlightRef.current = true;
+    safetyTimerRef.current = window.setTimeout(() => {
+      if (!popupInFlightRef.current) return;
+      clearAuthTimers();
+      if (!auth.currentUser) {
+        setLoading(false);
+        setError('Giriş pəncərəsi çox uzun çəkdi. Yenidən cəhd edin.');
+      }
+    }, 20000);
+
     try {
       await signInWithPopup(auth, googleProvider);
+      clearAuthTimers();
       onSuccess?.();
+      setLoading(false);
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Google hesabı ilə daxil olarkən xəta baş verdi.';
-      if (message.includes('popup-closed-by-user')) {
-        setError('Giriş pəncərəsi bağlandı. Yenidən cəhd edin.');
-      } else if (message.includes('popup-blocked')) {
-        setError('Brauzer açılan pəncərəni blokladı. İcazə verib yenidən yoxlayın.');
-      } else {
-        setError('Daxil olmaq mümkün olmadı. Zəhmət olmasa yenidən cəhd edin.');
-      }
-    } finally {
+      clearAuthTimers();
+      const formatted = formatFirebaseAuthError(err);
+      setError(formatted.text);
+      setNeedsExternalBrowser(Boolean(formatted.needsExternalBrowser));
       setLoading(false);
     }
   };
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden bg-[#08080B] text-white flex flex-col justify-between">
+    <div className="relative h-[100dvh] w-full overflow-y-auto overflow-x-hidden bg-[#08080B] text-white flex flex-col justify-between">
       {/* Ambient crimson cinema glow */}
       <div
         aria-hidden="true"
@@ -105,12 +283,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess }) => {
             </div>
           </div>
 
-          {/* Primary Google Sign-In CTA */}
+            {/* Primary Google Sign-In CTA */}
           <div className="mt-9 w-full max-w-sm">
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              disabled={loading}
+              disabled={loading || guestLoading}
               className="group relative flex min-h-[52px] w-full items-center justify-center gap-3 rounded-2xl bg-[#A8001E] px-6 py-3.5 text-base font-semibold text-white shadow-[0_12px_36px_rgba(255,32,78,0.38)] transition-all duration-200 hover:bg-[#C8102E] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 cursor-pointer"
             >
               <svg className="h-5 w-5 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
@@ -122,18 +300,60 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess }) => {
               <span>{loading ? 'Hesaba daxil olunur...' : 'Google hesabı ilə daxil ol'}</span>
             </button>
 
+            <button
+              type="button"
+              onClick={handleGuestSignIn}
+              disabled={loading || guestLoading}
+              className="mt-3 flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-2xl border border-white/15 bg-white/[0.06] px-6 py-3 text-sm font-semibold text-zinc-100 hover:bg-white/[0.12] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 transition-all cursor-pointer"
+            >
+              <UserCheck className="h-4 w-4 shrink-0 text-[#E04F67]" />
+              <span>{guestLoading ? 'Qonaq kimi açılır...' : 'Qonaq kimi daxil ol'}</span>
+            </button>
+
+            {loading && (
+              <div className="mt-2.5 flex items-center justify-between text-xs text-zinc-400">
+                <span>Google hesab pəncərəsi açılır...</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearAuthTimers();
+                    setLoading(false);
+                    setError(null);
+                  }}
+                  className="font-semibold text-[#E04F67] hover:underline cursor-pointer"
+                >
+                  Ləğv et
+                </button>
+              </div>
+            )}
+
             {error && (
-              <p
+              <div
                 role="alert"
-                className="mt-3 rounded-xl border border-[#A8001E]/40 bg-[#A8001E]/10 px-4 py-2.5 text-xs font-medium text-rose-200"
+                className="mt-3 space-y-2.5 rounded-xl border border-[#A8001E]/40 bg-[#A8001E]/10 px-4 py-3 text-xs font-medium text-rose-200"
               >
-                {error}
-              </p>
+                <p>{error}</p>
+                {needsExternalBrowser && typeof window !== 'undefined' && (
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href={window.location.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex min-h-[38px] items-center gap-2 rounded-xl bg-[#A8001E] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#C8102E] transition-colors"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      <span>Brauzerdə birbaşa aç</span>
+                    </a>
+                  </div>
+                )}
+              </div>
             )}
 
             <div className="mt-4 flex items-center gap-2 text-xs text-zinc-400">
               <ShieldCheck className="h-4 w-4 shrink-0 text-zinc-500" />
-              <span>Google hesabınızı seçdikdən sonra istifadəçi adınızı təyin edəcəksiniz.</span>
+              <span>
+                Bir dəfə daxil olduqdan sonra hesabınız yadda saxlanılır.
+              </span>
             </div>
           </div>
         </div>

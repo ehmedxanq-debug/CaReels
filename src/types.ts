@@ -3,9 +3,22 @@ export interface UserProfile {
   email: string;
   username: string;
   photoURL?: string;
+  bio?: string;
+  following?: string[];
+  followers?: string[];
   isBlocked?: boolean;
+  isGuest?: boolean;
   createdAt?: unknown;
   updatedAt?: unknown;
+}
+
+export interface PublicPersonProfile {
+  uid: string;
+  username: string;
+  photoURL?: string;
+  bio?: string;
+  following: string[];
+  followers: string[];
 }
 
 export interface PostItem {
@@ -13,6 +26,7 @@ export interface PostItem {
   videoUrl: string;
   posterUrl?: string;
   accountName: string;
+  authorPhotoURL?: string;
   caption: string;
   musicName: string;
   likesCount: number;
@@ -22,6 +36,8 @@ export interface PostItem {
   category: string;
   filters: string[];
   primaryFilter: string;
+  uid?: string;
+  username?: string;
   createdAtMs: number;
 }
 
@@ -30,6 +46,7 @@ export interface CommentItem {
   postId: string;
   userId: string;
   username: string;
+  authorPhotoURL?: string;
   text: string;
   parentId: string | null;
   createdAtMs: number;
@@ -47,6 +64,7 @@ export interface ChatMessage {
   id: string;
   userId: string;
   username: string;
+  authorPhotoURL?: string;
   text: string;
   isAdmin: boolean;
   createdAtMs: number;
@@ -71,6 +89,6 @@ export interface CarItem {
   createdAtMs: number;
 }
 
-export type MainTab = 'feed' | 'chat';
+export type MainTab = 'feed' | 'cars' | 'chat' | 'profile';
 export type RegionFilter = 'all' | 'az' | 'tr';
 export type CategoryFilter = string;

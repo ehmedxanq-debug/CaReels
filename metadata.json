@@ -1,6 +1,6 @@
 {
   "name": "CaReels",
-  "description": "CaReels — Musiqi və avtomobil yönümlü qısa video sosial media platforması.",
+  "description": "CaReels - Avtomobil həvəskarları üçün vertikal car reels, maşın videoları və avto sosial media platforması.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

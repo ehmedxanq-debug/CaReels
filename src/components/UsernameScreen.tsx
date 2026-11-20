@@ -12,6 +12,7 @@ import {
 import { ArrowRight, AtSign, LogOut } from 'lucide-react';
 import { auth, db, handleFirestoreError, OperationType } from '../firebase';
 import { UserProfile } from '../types';
+import { clearSavedRegisteredAccount, saveRegisteredProfile } from '../utils/accountStorage';
 import { CaReelsLogo } from './CaReelsLogo';
 
 interface UsernameScreenProps {
@@ -73,12 +74,18 @@ export const UsernameScreen: React.FC<UsernameScreenProps> = ({ user, onComplete
 
       await setDoc(doc(db, 'people', user.uid), profileData, { merge: true });
 
-      onComplete({
+      const completedProfile: UserProfile = {
         uid: user.uid,
         email: user.email || '',
         username: cleaned,
         photoURL: user.photoURL || '',
-      });
+        bio: '',
+        following: [],
+        followers: [],
+        isBlocked: false,
+      };
+      saveRegisteredProfile(completedProfile);
+      onComplete(completedProfile);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `people/${user.uid}`);
       setError('İstifadəçi adı yadda saxlanılarkən xəta baş verdi.');
@@ -88,7 +95,7 @@ export const UsernameScreen: React.FC<UsernameScreenProps> = ({ user, onComplete
   };
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden bg-[#08080B] text-white flex flex-col items-center justify-center px-6">
+    <div className="relative h-[100dvh] w-full overflow-y-auto overflow-x-hidden bg-[#08080B] text-white flex flex-col items-center justify-center px-6 py-8">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[420px] w-[420px] rounded-full bg-[#A8001E]/20 blur-[140px]"
@@ -107,7 +114,10 @@ export const UsernameScreen: React.FC<UsernameScreenProps> = ({ user, onComplete
           </div>
           <button
             type="button"
-            onClick={() => auth.signOut()}
+            onClick={() => {
+              clearSavedRegisteredAccount(user.uid);
+              auth.signOut();
+            }}
             className="flex min-h-[40px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-zinc-400 hover:bg-white/5 hover:text-white transition-colors cursor-pointer"
           >
             <LogOut className="h-3.5 w-3.5" />
