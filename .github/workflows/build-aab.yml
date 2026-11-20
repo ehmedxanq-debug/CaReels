@@ -1,0 +1,35 @@
+name: Build Android AAB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install Bubblewrap CLI
+        run: npm install -g @pwabuilder/bubblewrap
+
+      - name: Initialize TWA project
+        run: |
+          yes | bubblewrap init --manifest https://careels.ai.studio/manifest.json || true
+
+      - name: Build AAB
+        run: |
+          if [ -f twa-manifest.json ]; then
+            bubblewrap build --skipPwaValidation
+          fi
